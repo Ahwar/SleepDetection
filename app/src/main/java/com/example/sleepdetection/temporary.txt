@@ -1,0 +1,673 @@
+package com.example.sleepdetection;
+
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.content.res.AssetFileDescriptor;
+import android.graphics.Bitmap;
+import android.graphics.SurfaceTexture;
+import android.os.Bundle;
+import android.os.SystemClock;
+import android.util.Log;
+import android.util.Size;
+import android.view.TextureView;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.camera.core.CameraX;
+import androidx.camera.core.Preview;
+import androidx.camera.core.PreviewConfig;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import androidx.lifecycle.LifecycleOwner;
+
+import org.tensorflow.lite.Interpreter;
+import org.tensorflow.lite.gpu.GpuDelegate;
+
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
+
+public class MainActivity extends AppCompatActivity {
+
+    /**
+     * Dimensions of inputs.
+     */
+    static final int DIM_IMG_SIZE_X = 224;
+    static final int DIM_IMG_SIZE_Y = 224;
+    private static final int DIM_BATCH_SIZE = 1;
+    private static final int DIM_PIXEL_SIZE = 3;
+    private static final int IMAGE_MEAN = 128;
+    private static final float IMAGE_STD = 128.0f;
+    private static final String model_name = "eye_state_model_tensorFlow.tflite";
+    private static final String TAG = "Main Activity";
+    /* Pre allocated buffers for storing image data in. */
+    private final int[] intValues = new int[DIM_IMG_SIZE_X * DIM_IMG_SIZE_Y];
+    private ByteBuffer imgData;
+    private MappedByteBuffer modelFile;
+    private Interpreter interpreter = null;
+    private int HAS_CAMERA_ACCESS;
+    float[][] output = new float[1][2];
+
+
+    public MainActivity() {
+        Log.v(TAG, "constructor called");
+        imgData =
+                ByteBuffer.allocateDirect(
+                        DIM_BATCH_SIZE
+                                * DIM_IMG_SIZE_X
+                                * DIM_IMG_SIZE_Y
+                                * DIM_PIXEL_SIZE
+                                * 4);
+        imgData.order(ByteOrder.nativeOrder());
+    }
+
+    public enum Device {
+        CPU,
+        NNAPI,
+        GPU
+    }
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+
+        Button button = findViewById(R.id.start);
+
+        button.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startProcessing();
+            }
+        });
+
+    }
+
+    /**
+     * Memory-map the model file in Assets.
+     */
+    private MappedByteBuffer loadModelFile(String filePath) throws IOException {
+
+        AssetFileDescriptor fileDescriptor = this.getAssets().openFd((filePath));
+        FileInputStream inputStream = new FileInputStream(fileDescriptor.getFileDescriptor());
+        FileChannel fileChannel = inputStream.getChannel();
+        long startOffset = fileDescriptor.getStartOffset();
+        long declaredLength = fileDescriptor.getDeclaredLength();
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
+    }
+
+    private void startProcessing() {
+        // Here, thisActivity is the current activity
+        if (ContextCompat.checkSelfPermission(MainActivity.this,
+                Manifest.permission.READ_CONTACTS)
+                != PackageManager.PERMISSION_GRANTED) {
+
+            // Permission is not granted
+            // Should we show an explanation?
+            if (ActivityCompat.shouldShowRequestPermissionRationale(MainActivity.this,
+                    Manifest.permission.READ_CONTACTS)) {
+                // Show an explanation to the user *asynchronously* -- don't block
+                // this thread waiting for the user's response! After the user
+                // sees the explanation, try again to request the permission.
+            } else {
+                // No explanation needed; request the permission
+                ActivityCompat.requestPermissions(MainActivity.this,
+                        new String[]{Manifest.permission.READ_CONTACTS},
+                        HAS_CAMERA_ACCESS);
+
+
+                // HAS_CAMERA_ACCESS is an
+                // app-defined int constant. The callback method gets the
+                // result of the request.
+            }
+        } else {
+            startWork();
+        }
+    }
+
+    private void startWork() {
+        // load model file in modelFile
+        try {
+            modelFile = loadModelFile(MainActivity.model_name);
+        } catch (Exception IOException) {
+            Toast.makeText(this, "Error Loading File", Toast.LENGTH_SHORT).show();
+        }
+
+        // Set Options to tfLite Interpreter
+        Interpreter.Options tfliteOptions = new Interpreter.Options();
+
+        Device device = Device.NNAPI;
+        switch (device) {
+            // set Options according to Device
+            case NNAPI:
+                tfliteOptions.setUseNNAPI(true);
+                break;
+            case GPU:
+                GpuDelegate delegate = new GpuDelegate();
+                tfliteOptions.addDelegate(delegate);
+                break;
+            case CPU:
+                break;
+        }
+//        tfliteOptions.setNumThreads(2);
+        try {
+            interpreter = new Interpreter(modelFile, tfliteOptions);
+//            long startTime = SystemClock.uptimeMillis();
+//
+//            interpreter.run(imgData, output);
+//            long endTime = SystemClock.uptimeMillis();
+//            Log.v(TAG, ("Running one Image in Model, Output: " + output[0][0]) + ", " + output[0][1] + " Time Cost " + (endTime - startTime) + " milliSeconds");
+            startCamera();
+        } catch (Exception IOException) {
+            Toast.makeText(this, "Error Starting interference", Toast.LENGTH_SHORT).show();
+        }
+
+        Toast.makeText(MainActivity.this, "starting interference", Toast.LENGTH_SHORT).show();
+    }
+
+    private void startCamera() {
+        // set the camera position FRONT or BACK
+        CameraX.LensFacing lensFacing = CameraX.LensFacing.FRONT;
+
+
+        final PreviewConfig previewConfig =
+                new PreviewConfig.Builder()
+                        .setLensFacing(lensFacing)
+                        .setTargetResolution(new Size(224, 224))
+//                        .setTargetAspectRatio(new Rational(1, 1))
+                        .build();
+
+
+        /*ImageAnalysisConfig imageAnalysisConfig =       // [reference__1]
+                new ImageAnalysisConfig.Builder()
+                        .setTargetResolution(new Size(224, 224))
+                        .setImageReaderMode(ImageAnalysis.ImageReaderMode.ACQUIRE_NEXT_IMAGE)
+                        .setLensFacing(lensFacing)
+                        .build();*/
+
+
+        final TextureView textureView = findViewById(R.id.view_finder);
+        Preview preview = new Preview(previewConfig);
+        preview.setOnPreviewOutputUpdateListener(
+                new Preview.OnPreviewOutputUpdateListener() {
+                    @Override
+                    public void onUpdated(@NonNull Preview.PreviewOutput previewOutput) {
+                        // Your code here. For example, use previewOutput.getSurfaceTexture()
+                        // and post to a GL renderer.
+                        // To update the SurfaceTexture, we have to remove it and re-add it
+
+                        ViewGroup parent = (ViewGroup) textureView.getParent();
+                        parent.removeView(textureView);
+                        parent.addView(textureView, 0);
+                        SurfaceTexture surfaceTexture = previewOutput.getSurfaceTexture();
+                        textureView.setSurfaceTexture(surfaceTexture);
+
+                    }
+                });
+        /*TextView imageattr = findViewById(R.id.Img_attr);
+        TextView imgattrValue = findViewById(R.id.Img_attr_value);
+        ImageView showImage = findViewById(R.id.showImage);*/
+//        imageattr.setText("Current TimeStamp: \nImage TimeStamp: \nImage Width: \nImage Height: \nImage Format: \n RotationDegree");
+
+
+
+
+        /*ImageAnalysis imageAnalysis = new ImageAnalysis(imageAnalysisConfig);
+
+        imageAnalysis.setAnalyzer(new ImageAnalysis.Analyzer() {
+            @Override
+            public void analyze(ImageProxy image, int rotationDegrees) {
+                long startTime = SystemClock.uptimeMillis();
+
+                long endTime = SystemClock.uptimeMillis();
+                Log.v(TAG, " MilliSeconds: " + (endTime - startTime));
+            }
+        });*/
+
+        CameraX.bindToLifecycle((LifecycleOwner) this, preview);
+
+    }
+
+    /**
+     * Writes Image data into a {@code ByteBuffer}.
+     */
+    private void convertBitmapToByteBuffer(Bitmap bitmap) { // reference = https://github.com/googlecodelabs/tensorflow-for-poets-2/blob/master/android/tflite/app/src/main/java/com/example/android/tflitecamerademo/ImageClassifier.java#L187
+        if (imgData == null) {
+            return;
+        }
+
+        imgData.rewind();
+        bitmap.getPixels(intValues, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
+        // Convert the image to floating point.
+        int pixel = 0;
+        long startTime = SystemClock.uptimeMillis();
+
+        for (int i = 0; i < DIM_IMG_SIZE_X; ++i) {
+            for (int j = 0; j < DIM_IMG_SIZE_Y; ++j) {
+                final int val = intValues[pixel++];
+                imgData.putFloat((((val >> 16) & 0xFF) - IMAGE_MEAN) / IMAGE_STD);
+//                imgData.put((byte) ((val >> 16) & 0xFF));
+            }
+        }
+
+        pixel = 0;
+        for (int i = 0; i < DIM_IMG_SIZE_X; ++i) {
+            for (int j = 0; j < DIM_IMG_SIZE_Y; ++j) {
+                final int val = intValues[pixel++];
+                imgData.putFloat((((val >> 8) & 0xFF) - IMAGE_MEAN) / IMAGE_STD);
+//                imgData.put((byte) ((val >> 8) & 0xFF));
+            }
+        }
+
+        pixel = 0;
+        for (int i = 0; i < DIM_IMG_SIZE_X; ++i) {
+            for (int j = 0; j < DIM_IMG_SIZE_Y; ++j) {
+                final int val = intValues[pixel++];
+                imgData.putFloat((((val) & 0xFF) - IMAGE_MEAN) / IMAGE_STD);
+//                imgData.put((byte) (val & 0xFF));
+            }
+        }
+
+        long endTime = SystemClock.uptimeMillis();
+        Log.v(TAG, "Time cost to put values into ByteBuffer: " + (endTime - startTime) + " milliSeconds");
+    }
+}
+
+
+
+check the rect in image corop in imaganalysis
+confirm the permission part
+
+
+
+
+
+
+
+.................................../
+/
+/
+/
+/
+
+/
+/
+/
+/
+/
+/
+/
+/
+package com.example.sleepdetection;
+
+import android.graphics.SurfaceTexture;
+import android.os.Bundle;
+import android.view.TextureView;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.camera.core.CameraX;
+import androidx.camera.core.Preview;
+import androidx.camera.core.PreviewConfig;
+
+public class MainActivity extends AppCompatActivity {
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+        Button button = findViewById(R.id.start);
+
+        button.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startWork();
+            }
+        });
+
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+
+
+    }
+
+    private void startWork() {
+//        CameraX.LensFacing = CameraX
+        CameraX.unbindAll();
+        PreviewConfig config = new PreviewConfig.Builder().build();
+        Preview preview = new Preview(config);
+        final TextureView textureView = findViewById(R.id.view_finder);
+        preview.setOnPreviewOutputUpdateListener(
+                new Preview.OnPreviewOutputUpdateListener() {
+
+                    @Override
+                    public void onUpdated(@NonNull Preview.PreviewOutput previewOutput) {
+                        // Your code here. For example, use previewOutput.getSurfaceTexture()
+                        // and post to a GL renderer.
+                        // To update the SurfaceTexture, we have to remove it and re-add it
+
+                        ViewGroup parent = (ViewGroup) textureView.getParent();
+                        parent.removeView(textureView);
+                        parent.addView(textureView, 0);
+                        SurfaceTexture surfaceTexture = previewOutput.getSurfaceTexture();
+                        textureView.setSurfaceTexture(surfaceTexture);
+                    }
+
+                });
+
+        CameraX.bindToLifecycle(this, preview);
+    }
+}
+/
+/
+/
+/
+/
+//
+//
+/
+/
+/
+/
+package com.example.sleepdetection;
+
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.content.res.AssetFileDescriptor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.ImageFormat;
+import android.graphics.Rect;
+import android.graphics.SurfaceTexture;
+import android.graphics.YuvImage;
+import android.os.Bundle;
+import android.os.SystemClock;
+import android.util.Log;
+import android.util.Size;
+import android.view.TextureView;
+import android.widget.Toast;
+
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.camera.core.CameraX;
+import androidx.camera.core.ImageAnalysis;
+import androidx.camera.core.ImageAnalysisConfig;
+import androidx.camera.core.ImageProxy;
+import androidx.camera.core.Preview;
+import androidx.camera.core.PreviewConfig;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+
+import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
+
+public class MainActivity extends AppCompatActivity {
+    private int HAS_CAMERA_ACCESS;
+    private static final String TAG = "TAG Main Activity";
+    /**
+     * Dimensions of inputs.
+     */
+    private static final int DIM_BATCH_SIZE = 1;
+
+    private static final int DIM_PIXEL_SIZE = 3;
+
+    static final int DIM_IMG_SIZE_X = 224;
+    static final int DIM_IMG_SIZE_Y = 224;
+
+    private static final int IMAGE_MEAN = 128;
+    private static final float IMAGE_STD = 128.0f;
+
+    /* Preallocated buffers for storing image data in. */
+    private int[] intValues = new int[DIM_IMG_SIZE_X * DIM_IMG_SIZE_Y];
+    private ByteBuffer imgData = null;
+
+    private static final Rect bitmaprect = new Rect(49, 7, 273, 231);
+    private static final String model_name = "eye_state_model_tensorFlow.tflite";
+    private static float[][] outputProbArray = new float[1][2];
+
+    private static MappedByteBuffer modelFile = null;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+        imgData = ByteBuffer.allocateDirect(
+                4 * DIM_BATCH_SIZE * DIM_IMG_SIZE_X * DIM_IMG_SIZE_Y * DIM_PIXEL_SIZE);
+
+        startProcessing();
+    }
+
+    private void startProcessing() {
+        if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "No Camera Permission", Toast.LENGTH_SHORT).show();
+            /*// Permission is not granted
+            // Should we show an explanation?
+            if (ActivityCompat.shouldShowRequestPermissionRationale(this,
+                    Manifest.permission.CAMERA)) {
+                AlertDialog.Builder dialogBuilder = new AlertDialog.Builder(MainActivity.this);
+                dialogBuilder.setTitle("Camera Access");
+                AlertDialog requestCameraDialog = dialogBuilder.create();
+                Toast.makeText(this, "Please Give Camera Permission", Toast.LENGTH_SHORT).show();
+            } else {*/
+            // No explanation needed; request the permission
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.CAMERA}, HAS_CAMERA_ACCESS);
+
+        } else {
+            Toast.makeText(this, "Has Camera Permission", Toast.LENGTH_SHORT).show();
+            // Permission has already been granted
+            startCamera();
+        }
+    }
+
+    private void startCamera() {
+        // set the camera position FRONT or BACK
+        CameraX.LensFacing lensFacing = CameraX.LensFacing.BACK;
+
+
+        PreviewConfig previewConfig =
+                new PreviewConfig.Builder()
+                        .setLensFacing(lensFacing)
+                        .setTargetResolution(new Size(224, 224))
+//                        .setTargetAspectRatio(new Rational(1, 1))
+                        .build();
+
+
+        ImageAnalysisConfig imageAnalysisConfig =       // [reference__1]
+                new ImageAnalysisConfig.Builder()
+                        .setTargetResolution(new Size(224, 224))
+                        .setImageReaderMode(ImageAnalysis.ImageReaderMode.ACQUIRE_NEXT_IMAGE)
+                        .setLensFacing(lensFacing)
+                        .build();
+
+
+        final TextureView textureView = findViewById(R.id.view_finder);
+        Preview preview = new Preview(previewConfig);
+
+        preview.setOnPreviewOutputUpdateListener(
+                new Preview.OnPreviewOutputUpdateListener() {
+                    @Override
+                    public void onUpdated(Preview.PreviewOutput previewOutput) {
+                        // The output data-handling is configured in a listener.
+                        //  To update the SurfaceTexture, we have to remove it and re-add it
+                        SurfaceTexture surfaceTexture = previewOutput.getSurfaceTexture();
+                        textureView.setSurfaceTexture(surfaceTexture);
+                    }
+                }
+        );
+
+
+        /*try {
+            modelFile = loadModelFile(model_name);
+        } catch (Exception e) {
+            Toast.makeText(this, "Error Loading File", Toast.LENGTH_SHORT).show();
+        }*/
+
+
+/*        ImageAnalysis imageAnalysis = new ImageAnalysis(imageAnalysisConfig);
+
+        imageAnalysis.setAnalyzer(new ImageAnalysis.Analyzer() {
+            @Override
+            public void analyze(ImageProxy image, int rotationDegrees) {
+                long startTime = SystemClock.uptimeMillis();
+//                imgattrValue.setText(System.currentTimeMillis() + "\n" + image.getTimestamp() + "\n" + image.getWidth() + "\n" + image.getHeight() + "\n" + image.getFormat() + "\n" + rotationDegrees);
+                try (Interpreter interpreter = new Interpreter(modelFile)) {
+                    Bitmap bitmap = imageToBitmap(image, rotationDegrees);
+                    convertBitmapToByteBuffer(bitmap);
+                    if (imgData != null)
+//                        interpreter.run(imgData, outputProbArray);
+                        Log.v(TAG, "Close Chance: " + outputProbArray[0][0] + " Open Chance: " + outputProbArray[0][1]);
+//                    Toast.makeText(MainActivity.this, " Close Chance: " + outputProbArray[0][0] + " Open Chance: " + outputProbArray[0][1], Toast.LENGTH_SHORT).show();
+//                    Log.v(TAG, " Image Width: " + image.getWidth() + " Image Height" + image.getHeight());
+//                    Log.v(TAG, " Bitmap Width: " + bitmap.getWidth() + " Bitmap Height " + bitmap.getHeight());
+
+                    long endTime = SystemClock.uptimeMillis();
+                    Log.v(TAG, " MilliSeconds: " + (endTime - startTime));
+                }
+            }
+
+        });*/
+
+        CameraX.bindToLifecycle(this, preview);
+
+    }
+
+    private Bitmap imageToBitmapimageToBitmap(ImageProxy image, float rotationDegrees) {
+
+        assert (image.getFormat() == ImageFormat.NV21);
+
+        // NV21 is a plane of 8 bit Y values followed by interleaved  Cb Cr
+        ByteBuffer ib = ByteBuffer.allocate(image.getHeight() * image.getWidth() * 2);
+
+        ByteBuffer y = image.getPlanes()[0].getBuffer();
+        ByteBuffer cr = image.getPlanes()[1].getBuffer();
+        ByteBuffer cb = image.getPlanes()[2].getBuffer();
+        ib.put(y);
+        ib.put(cb);
+        ib.put(cr);
+
+        YuvImage yuvImage = new YuvImage(ib.array(),
+                ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+//        yuvImage.compressToJpeg(new Rect(0, 0,
+//                image.getWidth(), image.getHeight()), 50, out);
+        yuvImage.compressToJpeg(bitmaprect, 50, out);
+        byte[] imageBytes = out.toByteArray();
+        Bitmap bm = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
+        Bitmap bitmap = bm;
+
+        // On android the camera rotation and the screen rotation
+        // are off by 90 degrees, so if you are capturing an image
+        // in "portrait" orientation, you'll need to rotate the image.
+        /*if (rotationDegrees != 0) {
+            Matrix matrix = new Matrix();
+            matrix.postRotate(rotationDegrees);
+            Bitmap scaledBitmap = Bitmap.createScaledBitmap(bm,
+                    bm.getWidth(), bm.getHeight(), true);
+            bitmap = Bitmap.createBitmap(scaledBitmap, 0, 0,
+                    scaledBitmap.getWidth(), scaledBitmap.getHeight(), matrix, true);
+        }*/
+        return bitmap;
+    }
+
+    /**
+     * Memory-map the model file in Assets.
+     */
+    private MappedByteBuffer loadModelFile(String filePath) throws IOException {
+        AssetFileDescriptor fileDescriptor = this.getAssets().openFd((filePath));
+        FileInputStream inputStream = new FileInputStream(fileDescriptor.getFileDescriptor());
+        FileChannel fileChannel = inputStream.getChannel();
+        long startOffset = fileDescriptor.getStartOffset();
+        long declaredLength = fileDescriptor.getDeclaredLength();
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
+    }
+
+    /**
+     * Writes Image data into a {@code ByteBuffer}.
+     */
+    private void convertBitmapToByteBuffer(Bitmap bitmap) { // reference = https://github.com/googlecodelabs/tensorflow-for-poets-2/blob/master/android/tflite/app/src/main/java/com/example/android/tflitecamerademo/ImageClassifier.java#L187
+        if (imgData == null) {
+            return;
+        }
+
+        imgData.rewind();
+        bitmap.getPixels(intValues, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
+        // Convert the image to floating point.
+        int pixel = 0;
+        long startTime = SystemClock.uptimeMillis();
+
+        for (int i = 0; i < DIM_IMG_SIZE_X; ++i) {
+            for (int j = 0; j < DIM_IMG_SIZE_Y; ++j) {
+                final int val = intValues[pixel++];
+                imgData.putFloat((((val >> 16) & 0xFF) - IMAGE_MEAN) / IMAGE_STD);
+//                imgData.put((byte) ((val >> 16) & 0xFF));
+            }
+        }
+
+        pixel = 0;
+        for (int i = 0; i < DIM_IMG_SIZE_X; ++i) {
+            for (int j = 0; j < DIM_IMG_SIZE_Y; ++j) {
+                final int val = intValues[pixel++];
+                Float f = (((val >> 8) & 0xFF) - IMAGE_MEAN) / IMAGE_STD;
+                imgData.putFloat((((val >> 8) & 0xFF) - IMAGE_MEAN) / IMAGE_STD);
+
+//                imgData.put((byte) ((val >> 8) & 0xFF));
+
+            }
+        }
+
+        pixel = 0;
+        for (int i = 0; i < DIM_IMG_SIZE_X; ++i) {
+            for (int j = 0; j < DIM_IMG_SIZE_Y; ++j) {
+                final int val = intValues[pixel++];
+                imgData.putFloat((((val) & 0xFF) - IMAGE_MEAN) / IMAGE_STD);
+//                imgData.put((byte) (val & 0xFF));
+            }
+        }
+
+        long endTime = SystemClock.uptimeMillis();
+        Log.v(TAG, "Time cost to put values into ByteBuffer: " + (endTime - startTime) + " milliSeconds");
+    }
+}
+
+private Bitmap toBitmap(Image image) { // reference = https://stackoverflow.com/questions/56772967/converting-imageproxy-to-bitmap/56812799
+        Image.Plane[] planes = image.getPlanes();
+        ByteBuffer yBuffer = planes[0].getBuffer();
+        ByteBuffer uBuffer = planes[1].getBuffer();
+        ByteBuffer vBuffer = planes[2].getBuffer();
+
+        int ySize = yBuffer.remaining();
+        int uSize = uBuffer.remaining();
+        int vSize = vBuffer.remaining();
+
+        byte[] nv21 = new byte[ySize + uSize + vSize];
+        //U and V are swapped
+        yBuffer.get(nv21, 0, ySize);
+        vBuffer.get(nv21, ySize, vSize);
+        uBuffer.get(nv21, ySize + vSize, uSize);
+
+        YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        yuvImage.compressToJpeg(new Rect(49, 7, 273, 231), 75, out);
+//        yuvImage.compressToJpeg(new Rect(0, 0, yuvImage.getWidth(), image.getHeight()), 75, out);
+        byte[] imageBytes = out.toByteArray();
+        return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
+    }

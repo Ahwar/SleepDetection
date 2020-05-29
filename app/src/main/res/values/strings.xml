@@ -1,4 +1,9 @@
 <resources>
     <string name="app_name">Sleep Detection</string>
     <string name="button">Button</string>
+    <string name="startButton">Start</string>
+    <string name="stopButton">Stop</string>
+    <string name="image_attributes_values">%1$d\n%2$d\n%3$d\n%4$d\n%5$d\n%6$d\n</string>
+    <string name="close">Close</string>
+    <string name="open">Open</string>
 </resources>
