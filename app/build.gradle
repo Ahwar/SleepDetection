@@ -4,7 +4,7 @@ android {
     compileSdkVersion 29
     defaultConfig {
         applicationId "com.example.sleepdetection"
-        minSdkVersion 16
+        minSdkVersion 21
         targetSdkVersion 29
         versionCode 1
         versionName "1.0"
@@ -41,4 +41,14 @@ dependencies {
     implementation "androidx.appcompat:appcompat:$appcompat_version"
     // For loading and tinting drawables on older versions of the platform
     implementation "androidx.appcompat:appcompat-resources:$appcompat_version"
+
+    // CameraX core library using the camera2 implementation
+    def camerax_version = '1.0.0-beta05'
+    implementation "androidx.camera:camera-camera2:${camerax_version}"
+    // If you want to additionally use the CameraX Lifecycle library
+    implementation "androidx.camera:camera-lifecycle:${camerax_version}"
+    // If you want to additionally use the CameraX View class
+    implementation 'androidx.camera:camera-view:1.0.0-alpha12'
+    // If you want to additionally use the CameraX Extensions library
+    // implementation "androidx.camera:camera-extensions:1.0.0-alpha10"
 }

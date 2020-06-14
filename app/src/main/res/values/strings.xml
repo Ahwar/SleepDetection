@@ -3,7 +3,7 @@
     <string name="button">Button</string>
     <string name="startButton">Start</string>
     <string name="stopButton">Stop</string>
-    <string name="image_attributes_values">%1$d\n%2$d\n%3$d\n%4$d\n%5$d\n%6$d\n</string>
+    <string name="image_attributes">Current TimeStamp: %1$d\nImage Width: %2$d\nImage Height: %3$d\nImage format ID: %4$d\nRotation Degrees: %5$d</string>
     <string name="close">Close</string>
     <string name="open">Open</string>
 </resources>
