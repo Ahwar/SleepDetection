@@ -1,9 +1,17 @@
 package com.example.sleepdetection;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.content.pm.PackageManager;
-import android.os.AsyncTask;
+import android.content.res.AssetFileDescriptor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.ImageFormat;
+import android.graphics.Rect;
+import android.graphics.YuvImage;
+import android.media.Image;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.util.Log;
 import android.util.Size;
 import android.view.OrientationEventListener;
@@ -27,16 +35,60 @@ import androidx.core.content.ContextCompat;
 
 import com.google.common.util.concurrent.ListenableFuture;
 
+import org.tensorflow.lite.Interpreter;
+import org.tensorflow.lite.gpu.GpuDelegate;
+
+import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
+import java.util.Objects;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends AppCompatActivity {
-
+    /**
+     * Dimensions of inputs.
+     */
+    // model input image size
+    static final int DIM_IMG_SIZE_X = 224;
+    static final int DIM_IMG_SIZE_Y = 224;
+    private static final int DIM_BATCH_SIZE = 1;
+    private static final int DIM_PIXEL_SIZE = 3;
+    private static final int IMAGE_MEAN = 128;
+    private static final float IMAGE_STD = 128.0f;
+    private static final String model_name = "eye_state_model_tensorFlow_opt_default.tflite";
     private static final String TAG = "Main Activity";
+    /* Pre allocated buffers for storing image data in. */
+    private final int[] intValues = new int[DIM_IMG_SIZE_X * DIM_IMG_SIZE_Y];
     public ProcessCameraProvider cameraProvider;
     public int HAS_CAMERA_ACCESS;
-    Button stopButton = null;
-    private ListenableFuture<ProcessCameraProvider> cameraProviderFuture;
+    // to save output
+    // TODO: if size of your model output is different change it accordingly
+    float[][] output = new float[1][2];
+    private ByteBuffer imgData;
+    private MappedByteBuffer modelFile;
     private Button startButton = null;
+    private Button stopButton = null;
+    private ListenableFuture<ProcessCameraProvider> cameraProviderFuture;
+
+    public MainActivity() {
+        Log.v(TAG, "constructor called");
+        // allocate placeholder data to Image ByteBuffer
+        imgData =
+                ByteBuffer.allocateDirect(
+                        DIM_BATCH_SIZE
+                                * DIM_IMG_SIZE_X
+                                * DIM_IMG_SIZE_Y
+                                * DIM_PIXEL_SIZE
+                                * 4);
+        imgData.order(ByteOrder.nativeOrder());
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -114,99 +166,260 @@ public class MainActivity extends AppCompatActivity {
      * Start the Front Camera
      * After starting Camera Start perform image Preview and Analysis
      * */
+    @SuppressLint("UnsafeExperimentalUsageError")
     private void startCamera() {
         // for more help https://developer.android.com/training/camerax/preview
         // get preview View's xml Reference
         PreviewView previewView = findViewById(R.id.view_finder);
         // get TextView's xml Reference
         TextView imageAttributes = findViewById(R.id.img_attr);
-
-        // Check for CameraProvider availability
-        // Listener to confirm CameraProvider is initialized
-        cameraProviderFuture.addListener(() -> {
-            try {
-                cameraProvider = cameraProviderFuture.get();
-                // preview use case builder
-                Preview preview = new Preview.Builder()
-                        .setTargetResolution(new Size(224, 224))
-                        .build();
-                // Image analysis use case builder
-                // more help for image analysis https://developer.android.com/training/camerax/analyze#implementation
-                ImageAnalysis imageAnalysis =
-                        new ImageAnalysis.Builder()
-                                .setTargetResolution(new Size(224, 224))
-                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                                .build();
+        // load TFLite model file
+        try {
+            modelFile = loadModelFile();
+        } catch (Exception e) {
+            Toast.makeText(this, "Error Loading Model File", Toast.LENGTH_SHORT).show();
+        }
+        // set option for tfLite Interpreter
+        Interpreter.Options tfliteOptions = new Interpreter.Options();
+        Device device = Device.CPU;
+        switch (device) {
+            case NNAPI:
+                tfliteOptions.setUseNNAPI(true);
+                break;
+            case GPU:
+                GpuDelegate delegate = new GpuDelegate();
+                tfliteOptions.addDelegate(delegate);
+                break;
+            case CPU:
+                break;
+        }
+        // number of thread for inference
+        tfliteOptions.setNumThreads(2);
+        // load TFLite Interpreter from model file
+        try {
+            Interpreter interpreter = new Interpreter(modelFile, tfliteOptions);
+            // Check for CameraProvider availability
+            // Listener to confirm CameraProvider is initialized
+            cameraProviderFuture.addListener(() -> {
+                try {
+                    cameraProvider = cameraProviderFuture.get();
+                    // preview use case builder
+                    Preview preview = new Preview.Builder()
+//                            .setTargetResolution(new Size(224, 224))
+                            .build();
+                    // Image analysis use case builder
+                    // more help for image analysis https://developer.android.com/training/camerax/analyze#implementation
+                    ImageAnalysis imageAnalysis =
+                            new ImageAnalysis.Builder()
+                                    .setTargetResolution(new Size(DIM_IMG_SIZE_X, DIM_IMG_SIZE_Y))
+                                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                    .build();
                 /*
                 Change Image Analysis Rotation
                 according to device rotation
                 * */
-                OrientationEventListener orientationEventListener = new OrientationEventListener(this) {
-                    // reference https://developer.android.com/training/camerax/configuration#rotation
-                    @Override
-                    public void onOrientationChanged(int orientation) {
-                        int rotation;
+                    OrientationEventListener orientationEventListener = new OrientationEventListener(this) {
+                        // reference https://developer.android.com/training/camerax/configuration#rotation
+                        @Override
+                        public void onOrientationChanged(int orientation) {
+                            int rotation;
 
-                        // Monitors orientation values to determine the target rotation value
-                        if (orientation >= 45 && orientation < 135) {
-                            rotation = Surface.ROTATION_270;
-                        } else if (orientation >= 135 && orientation < 225) {
-                            rotation = Surface.ROTATION_180;
-                        } else if (orientation >= 225 && orientation < 315) {
-                            rotation = Surface.ROTATION_90;
-                        } else {
-                            rotation = Surface.ROTATION_0;
+                            // Monitors orientation values to determine the target rotation value
+                            if (orientation >= 45 && orientation < 135) {
+                                rotation = Surface.ROTATION_270;
+                            } else if (orientation >= 135 && orientation < 225) {
+                                rotation = Surface.ROTATION_180;
+                            } else if (orientation >= 225 && orientation < 315) {
+                                rotation = Surface.ROTATION_90;
+                            } else {
+                                rotation = Surface.ROTATION_0;
+                            }
+                            imageAnalysis.setTargetRotation(rotation);
                         }
-                        imageAnalysis.setTargetRotation(rotation);
-                    }
-                };
-                orientationEventListener.enable();
+                    };
+                    orientationEventListener.enable();
 
-                // what analysis to perform on Camera Output Frames
-                imageAnalysis.setAnalyzer(AsyncTask.THREAD_POOL_EXECUTOR, (@NonNull ImageProxy image) -> {
-                    // Async Image Analysis
-                    int rotationDegrees = image.getImageInfo().getRotationDegrees();
-                    // insert your code here.
-                    Log.v(TAG, "Image Analysis frame's TimeStamp: " + image.getImageInfo().getTimestamp()
-                            + " and rotation degrees : " + rotationDegrees);
+                    ExecutorService e = Executors.newSingleThreadExecutor();
+                    // what analysis to perform on Camera Output Frames
+                    imageAnalysis.setAnalyzer(e, new ImageAnalysis.Analyzer() {
+                        @Override
+                        public void analyze(@NonNull ImageProxy imageProxy) {
+                            // Async Image Analysis
+                            int rotationDegrees = imageProxy.getImageInfo().getRotationDegrees();
+                            // insert your code here.
 
-                    // execute it on main UI thread
-                    runOnUiThread(() -> {
+                            Log.v(TAG, "Image Analysis frame's TimeStamp: " + imageProxy.getImageInfo().getTimestamp()
+                                    + " and rotation degrees : " + rotationDegrees);
 
-                        imageAttributes.setText(getString(R.string.image_attributes, System.currentTimeMillis(),
-                                image.getWidth(), image.getHeight(), image.getFormat(), rotationDegrees));
-                        // close image to avoid issues
-                        image.close();
+                            // convert image to bitmap then to ByteBuffer
+                            // save ByteBuffer to imgData variable
+                            Bitmap bitmap = toBitmap(Objects.requireNonNull(imageProxy.getImage()));
+                            convertBitmapToByteBuffer(bitmap);
+                            long inference_start = System.currentTimeMillis();
+                            interpreter.run(imgData, output);
+                            long inference_end = System.currentTimeMillis();
+                            long inference_time = inference_end - inference_start;
+//                            Log.v(TAG, output[0][0] + " - " + output[0][1] + "" + inference_time);
+                            Log.v(TAG, (inference_time) + " milliseconds inference time");
+                            // execute it on main UI thread
+                            runOnUiThread(() -> {
+
+                                imageAttributes.setText(getString(R.string.image_attributes, System.currentTimeMillis(),
+                                        imageProxy.getWidth(), imageProxy.getHeight(), imageProxy.getFormat(), rotationDegrees));
+                                // close image to avoid issues
+                                imageProxy.close();
+                            });
+                            bitmap = null;
+                        }
                     });
-                });
-                // create Camera Selector and add configuration options
-                CameraSelector cameraSelector = new CameraSelector.Builder()
-                        // which camera lens to use Front OR Back
-                        .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
-                        .build();
-                // attach preview use case to PreviewView's Surface
-                preview.setSurfaceProvider(previewView.createSurfaceProvider());
-                // bind cameraProvider and use cases to LifeCycle to start camera
-                cameraProvider.bindToLifecycle(this, cameraSelector,
-                        preview, imageAnalysis);
-                // stops the Camera Session
-                stopButton.setOnClickListener((View v) -> {
+                    // create Camera Selector and add configuration options
+                    CameraSelector cameraSelector = new CameraSelector.Builder()
+                            // which camera lens to use Front OR Back
+                            .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
+                            .build();
+                    // attach preview use case to PreviewView's Surface
+                    preview.setSurfaceProvider(previewView.createSurfaceProvider());
+                    // bind cameraProvider and use cases to LifeCycle to start camera
+                    cameraProvider.bindToLifecycle(this, cameraSelector,
+                            preview, imageAnalysis);
+                    /*
+                     * Stop the camera session
+                     * release camera resources and use cases
+                     * release memory by deleting images, buffer data, interpreter and model files
+                     * */
+                    stopButton.setOnClickListener((View v) -> {
+                        // unbind all cameraX use cases
+                        cameraProvider.unbindAll();
 
-                    // unbind all cameraX use cases
-                    cameraProvider.unbindAll();
-                    // remove SurfaceTexture from PreviewView
-                    ViewGroup parent = (ViewGroup) previewView.getParent();
-                    parent.removeView(previewView);
-                    parent.addView(previewView, 0);
-                    Toast.makeText(this, "Camera Stopped", Toast.LENGTH_SHORT).show();
-                    startButton.setEnabled(true);
-                    stopButton.setEnabled(false);
-                });
+                        e.shutdownNow();
+                        try {
+                            if (e.awaitTermination(5, TimeUnit.SECONDS)) {
+                                // remove SurfaceTexture from PreviewView
+                                ViewGroup parent = (ViewGroup) previewView.getParent();
+                                parent.removeView(previewView);
+                                parent.addView(previewView, 0);
+                                imageAnalysis.clearAnalyzer();
 
-            } catch (ExecutionException | InterruptedException e) {
-                // No errors need to be handled for this Future.
-                // This should never be reached.
+                                // close model file and interpreter
+                                modelFile.clear();
+                                interpreter.close();
+                                imgData.clear();
+                                modelFile = null;
+                                imgData.clear();
+
+                                Toast.makeText(this, "Camera Stopped Successfully", Toast.LENGTH_SHORT).show();
+                                startButton.setEnabled(true);
+                                stopButton.setEnabled(false);
+                            }
+                        } catch (InterruptedException ex) {
+                            ex.printStackTrace();
+                        }
+                    });
+                } catch (ExecutionException | InterruptedException e) {
+                    // No errors need to be handled for this Future.
+                    // This should never be reached.
+                }
+            }, ContextCompat.getMainExecutor(this));
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Memory-map the model file in Assets.
+     */
+    private MappedByteBuffer loadModelFile() throws IOException {
+
+        AssetFileDescriptor fileDescriptor = this.getAssets().openFd(MainActivity.model_name);
+        FileInputStream inputStream = new FileInputStream(fileDescriptor.getFileDescriptor());
+        FileChannel fileChannel = inputStream.getChannel();
+        long startOffset = fileDescriptor.getStartOffset();
+        long declaredLength = fileDescriptor.getDeclaredLength();
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
+    }
+
+    private Bitmap toBitmap(Image image) {
+        // reference https://stackoverflow.com/a/58568495/7001213
+        Image.Plane[] planes = image.getPlanes();
+        ByteBuffer yBuffer = planes[0].getBuffer();
+        ByteBuffer uBuffer = planes[1].getBuffer();
+        ByteBuffer vBuffer = planes[2].getBuffer();
+
+        int ySize = yBuffer.remaining();
+        int uSize = uBuffer.remaining();
+        int vSize = vBuffer.remaining();
+
+        byte[] nv21 = new byte[ySize + uSize + vSize];
+        //U and V are swapped
+        yBuffer.get(nv21, 0, ySize);
+        vBuffer.get(nv21, ySize, vSize);
+        uBuffer.get(nv21, ySize + vSize, uSize);
+
+        YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int w = (image.getWidth() - DIM_IMG_SIZE_X) / 2;
+        int h = (image.getHeight() - DIM_IMG_SIZE_Y) / 2;
+        yuvImage.compressToJpeg(new Rect(w, h, w + DIM_IMG_SIZE_Y, h + DIM_IMG_SIZE_Y), 100, out);
+
+        byte[] imageBytes = out.toByteArray();
+        return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
+    }
+
+    /**
+     * Writes Image data into a {@code ByteBuffer}.
+     */
+    private void convertBitmapToByteBuffer(Bitmap bitmap) { // reference = https://github.com/googlecodelabs/tensorflow-for-poets-2/blob/master/android/tflite/app/src/main/java/com/example/android/tflitecamerademo/ImageClassifier.java#L187
+        if (imgData == null) {
+            return;
+        }
+
+        imgData.rewind();
+        bitmap.getPixels(intValues, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
+        // Convert the image to floating point.
+        long startTime = SystemClock.uptimeMillis();
+        int pixel = 0;
+
+        /*for (int i = 0; i < DIM_IMG_SIZE_X; ++i) {
+            for (int j = 0; j < DIM_IMG_SIZE_Y; ++j) {
+                final int val = intValues[pixel++];
+                imgData.putFloat((((val >> 16) & 0xFF) - IMAGE_MEAN) / IMAGE_STD);
+                imgData.putFloat((((val >> 8) & 0xFF) - IMAGE_MEAN) / IMAGE_STD);
+                imgData.putFloat((((val) & 0xFF) - IMAGE_MEAN) / IMAGE_STD);
             }
-        }, ContextCompat.getMainExecutor(this));
+        }*/
+        for (int i = 0; i < DIM_IMG_SIZE_X; ++i) {
+            for (int j = 0; j < DIM_IMG_SIZE_Y; ++j) {
+                final int val = intValues[pixel++];
+                imgData.putFloat((((val >> 16) & 0xFF) - IMAGE_MEAN) / IMAGE_STD);
+                // imgData.put((byte) ((val >> 8) & 0xFF));
+            }
+        }
+        pixel = 0;
+        for (int i = 0; i < DIM_IMG_SIZE_X; ++i) {
+            for (int j = 0; j < DIM_IMG_SIZE_Y; ++j) {
+                final int val = intValues[pixel++];
+                imgData.putFloat((((val >> 8) & 0xFF) - IMAGE_MEAN) / IMAGE_STD);
+                // imgData.put((byte) ((val >> 8) & 0xFF));
+            }
+        }
+
+        pixel = 0;
+        for (int i = 0; i < DIM_IMG_SIZE_X; ++i) {
+            for (int j = 0; j < DIM_IMG_SIZE_Y; ++j) {
+                final int val = intValues[pixel++];
+                imgData.putFloat((((val) & 0xFF) - IMAGE_MEAN) / IMAGE_STD);
+                // imgData.put((byte) (val & 0xFF));
+            }
+        }
+
+        long endTime = SystemClock.uptimeMillis();
+        Log.v(TAG, "Time cost to put values into ByteBuffer: " + (endTime - startTime) + " milliSeconds");
+    }
+
+    public enum Device {
+        CPU,
+        NNAPI,
+        GPU
     }
 }
+
