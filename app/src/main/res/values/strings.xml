@@ -6,4 +6,6 @@
     <string name="image_attributes">Current TimeStamp: %1$d\nImage Width: %2$d\nImage Height: %3$d\nImage format ID: %4$d\nRotation Degrees: %5$d</string>
     <string name="close">Close</string>
     <string name="open">Open</string>
+    <string name="yes">Sleeping? Yes</string>
+    <string name="no">Sleeping? No</string>
 </resources>

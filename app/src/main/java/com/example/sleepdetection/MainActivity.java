@@ -7,13 +7,14 @@ import android.content.res.AssetFileDescriptor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.ImageFormat;
+import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.YuvImage;
 import android.media.Image;
+import android.media.MediaPlayer;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
-import android.util.Size;
 import android.view.OrientationEventListener;
 import android.view.Surface;
 import android.view.View;
@@ -24,6 +25,7 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.camera.core.AspectRatio;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
@@ -62,7 +64,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int DIM_PIXEL_SIZE = 3;
     private static final int IMAGE_MEAN = 128;
     private static final float IMAGE_STD = 128.0f;
-    private static final String model_name = "eye_state_model_tensorFlow_opt_default.tflite";
+    private static final String model_name = "eye_state_model_tensorFlow.tflite";
     private static final String TAG = "Main Activity";
     /* Pre allocated buffers for storing image data in. */
     private final int[] intValues = new int[DIM_IMG_SIZE_X * DIM_IMG_SIZE_Y];
@@ -76,6 +78,9 @@ public class MainActivity extends AppCompatActivity {
     private Button startButton = null;
     private Button stopButton = null;
     private ListenableFuture<ProcessCameraProvider> cameraProviderFuture;
+    private MediaPlayer mediaPlayer = null;
+    private int isclosed = 0;
+    private TextView showOuput;
 
     public MainActivity() {
         Log.v(TAG, "constructor called");
@@ -100,6 +105,7 @@ public class MainActivity extends AppCompatActivity {
         startButton = findViewById(R.id.start);
         stopButton = findViewById(R.id.stop);
         stopButton.setEnabled(false);
+        showOuput = findViewById(R.id.show_state);
         startButton.setOnClickListener((View view) -> {
             // get permission for Camera
             // then execute model on frames
@@ -171,7 +177,7 @@ public class MainActivity extends AppCompatActivity {
         // for more help https://developer.android.com/training/camerax/preview
         // get preview View's xml Reference
         PreviewView previewView = findViewById(R.id.view_finder);
-        // get TextView's xml Reference
+        // get image attribute TextView's xml Reference
         TextView imageAttributes = findViewById(R.id.img_attr);
         // load TFLite model file
         try {
@@ -179,6 +185,7 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) {
             Toast.makeText(this, "Error Loading Model File", Toast.LENGTH_SHORT).show();
         }
+        mediaPlayer = MediaPlayer.create(getBaseContext(), R.raw.alarm);
         // set option for tfLite Interpreter
         Interpreter.Options tfliteOptions = new Interpreter.Options();
         Device device = Device.CPU;
@@ -205,13 +212,13 @@ public class MainActivity extends AppCompatActivity {
                     cameraProvider = cameraProviderFuture.get();
                     // preview use case builder
                     Preview preview = new Preview.Builder()
-//                            .setTargetResolution(new Size(224, 224))
+                            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                             .build();
                     // Image analysis use case builder
                     // more help for image analysis https://developer.android.com/training/camerax/analyze#implementation
                     ImageAnalysis imageAnalysis =
                             new ImageAnalysis.Builder()
-                                    .setTargetResolution(new Size(DIM_IMG_SIZE_X, DIM_IMG_SIZE_Y))
+                                    .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                                     .build();
                 /*
@@ -223,7 +230,7 @@ public class MainActivity extends AppCompatActivity {
                         @Override
                         public void onOrientationChanged(int orientation) {
                             int rotation;
-
+                            Log.v("orientation", "" + orientation);
                             // Monitors orientation values to determine the target rotation value
                             if (orientation >= 45 && orientation < 135) {
                                 rotation = Surface.ROTATION_270;
@@ -253,23 +260,44 @@ public class MainActivity extends AppCompatActivity {
 
                             // convert image to bitmap then to ByteBuffer
                             // save ByteBuffer to imgData variable
-                            Bitmap bitmap = toBitmap(Objects.requireNonNull(imageProxy.getImage()));
+                            Bitmap bitmap = toBitmap(Objects.requireNonNull(imageProxy.getImage()), rotationDegrees);
+//                            getResources().getDrawable(R.drawable.train_open)
                             convertBitmapToByteBuffer(bitmap);
                             long inference_start = System.currentTimeMillis();
                             interpreter.run(imgData, output);
                             long inference_end = System.currentTimeMillis();
                             long inference_time = inference_end - inference_start;
-//                            Log.v(TAG, output[0][0] + " - " + output[0][1] + "" + inference_time);
-                            Log.v(TAG, (inference_time) + " milliseconds inference time");
+                            Log.v(TAG, output[0][0] + " , " + output[0][1] + ", inference_time: " + inference_time);
+//                            Log.v(TAG, (inference_time) + " milliseconds inference time");
+                            if (output[0][0] < output[0][1]) {
+                                isclosed = isclosed + 1;
+                            }
+
+                            if (output[0][0] > output[0][1]) {
+                                isclosed = 0;
+                            }
+
                             // execute it on main UI thread
                             runOnUiThread(() -> {
+
+
+                                if (isclosed > 1) { // sleeping
+                                    if (!mediaPlayer.isPlaying())
+                                        mediaPlayer.start();
+                                    showOuput.setText(getResources().getString(R.string.yes));
+                                } else {
+                                    // not sleeping
+                                    showOuput.setText(getResources().getString(R.string.no));
+                                    if (mediaPlayer.isPlaying()) {
+                                        mediaPlayer.pause();
+                                    }
+                                }
 
                                 imageAttributes.setText(getString(R.string.image_attributes, System.currentTimeMillis(),
                                         imageProxy.getWidth(), imageProxy.getHeight(), imageProxy.getFormat(), rotationDegrees));
                                 // close image to avoid issues
                                 imageProxy.close();
                             });
-                            bitmap = null;
                         }
                     });
                     // create Camera Selector and add configuration options
@@ -278,7 +306,7 @@ public class MainActivity extends AppCompatActivity {
                             .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
                             .build();
                     // attach preview use case to PreviewView's Surface
-                    preview.setSurfaceProvider(previewView.createSurfaceProvider());
+                    preview.setSurfaceProvider(previewView.getSurfaceProvider());
                     // bind cameraProvider and use cases to LifeCycle to start camera
                     cameraProvider.bindToLifecycle(this, cameraSelector,
                             preview, imageAnalysis);
@@ -307,6 +335,7 @@ public class MainActivity extends AppCompatActivity {
                                 modelFile = null;
                                 imgData.clear();
 
+                                mediaPlayer.stop();
                                 Toast.makeText(this, "Camera Stopped Successfully", Toast.LENGTH_SHORT).show();
                                 startButton.setEnabled(true);
                                 stopButton.setEnabled(false);
@@ -338,7 +367,7 @@ public class MainActivity extends AppCompatActivity {
         return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
     }
 
-    private Bitmap toBitmap(Image image) {
+    private Bitmap toBitmap(Image image, int rotationDegrees) {
         // reference https://stackoverflow.com/a/58568495/7001213
         Image.Plane[] planes = image.getPlanes();
         ByteBuffer yBuffer = planes[0].getBuffer();
@@ -362,7 +391,16 @@ public class MainActivity extends AppCompatActivity {
         yuvImage.compressToJpeg(new Rect(w, h, w + DIM_IMG_SIZE_Y, h + DIM_IMG_SIZE_Y), 100, out);
 
         byte[] imageBytes = out.toByteArray();
-        return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
+        Bitmap bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
+        if (rotationDegrees != 0) {
+            Matrix matrix = new Matrix();
+            matrix.postRotate(rotationDegrees);
+            Bitmap scaledBitmap = Bitmap.createScaledBitmap(bitmap,
+                    bitmap.getWidth(), bitmap.getHeight(), true);
+            bitmap = Bitmap.createBitmap(scaledBitmap, 0, 0,
+                    scaledBitmap.getWidth(), scaledBitmap.getHeight(), matrix, true);
+        }
+        return bitmap;
     }
 
     /**
